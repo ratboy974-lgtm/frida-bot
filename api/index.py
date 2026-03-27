@@ -1,13 +1,7 @@
 import os, telebot, requests, io, json
 from openai import OpenAI
 from flask import Flask, request
-
-# Proviamo a caricare KV, se fallisce non blocchiamo tutto
-try:
-    from vercel_kv import kv
-    KV_AVAILABLE = True
-except ImportError:
-    KV_AVAILABLE = False
+import vercel_kv # Cambiato qui: importiamo l'intero modulo
 
 app = Flask(__name__)
 
@@ -20,17 +14,15 @@ client_oa = OpenAI(api_key=OA_K)
 client_or = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OR_K)
 bot = telebot.TeleBot(F_TK, threaded=False)
 
-SYS_MSG = "Sei Frida, una psicologa empatica e profonda. Usa 🌿 o ✨."
+# --- DNA DA PSICOLOGA ---
+SYS_MSG = "Sei Frida, una psicologa clinica senior. Il tuo tono è calmo, analitico ed empatico. Usa 🌿 o ✨."
 
 @app.route('/', methods=['GET', 'POST'])
 def handle_webhook():
     if request.method == 'POST':
-        try:
-            json_string = request.get_data().decode('utf-8')
-            update = telebot.types.Update.de_json(json_string)
-            bot.process_new_updates([update])
-        except Exception as e:
-            print(f"Errore Webhook: {e}")
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
         return "OK", 200
     return "Frida is ready to listen... 🌿", 200
 
@@ -49,16 +41,16 @@ def handle_msg(m):
             input_text = client_oa.audio.transcriptions.create(model="whisper-1", file=audio_io).text
         else:
             input_text = m.text
-    except:
-        return
+    except: return
 
-    # 2. Memoria (Protetta da crash)
-    history = []
-    if KV_AVAILABLE:
-        try:
-            history = kv.get(f"fr_hist_{cid}") or []
-        except:
-            pass
+    # 2. Gestione Memoria (Nuovo metodo di chiamata)
+    key = f"fr_hist_{cid}"
+    try:
+        # Usiamo vercel_kv.KV() invece di importare 'kv' direttamente
+        kv_storage = vercel_kv.KV() 
+        history = kv_storage.get(key) or []
+    except:
+        history = []
 
     messages = [{"role": "system", "content": SYS_MSG}]
     for h in history[-6:]: messages.append(h)
@@ -69,13 +61,12 @@ def handle_msg(m):
         res = client_or.chat.completions.create(model="google/gemini-2.0-flash-001", messages=messages)
         ans = res.choices[0].message.content
 
-        # Salva se possibile
-        if KV_AVAILABLE:
-            try:
-                history.append({"role": "user", "content": input_text})
-                history.append({"role": "assistant", "content": ans})
-                kv.set(f"fr_hist_{cid}", history[-15:])
-            except: pass
+        # Salva memoria
+        try:
+            history.append({"role": "user", "content": input_text})
+            history.append({"role": "assistant", "content": ans})
+            vercel_kv.KV().set(key, history[-15:])
+        except: pass
 
         if rispondi_a_voce:
             v_res = client_oa.audio.speech.create(model="tts-1", voice="alloy", input=ans)
